@@ -184,7 +184,7 @@ def encodeinput(s):
     return s.encode(get_encoding())
 
 
-def test(path, shell, indent=2):
+def test(path, shell, shell_args, indent=2, ignore=None):
     """Run test at path and return input, output, and diff.
 
     This returns a 3-tuple containing the following:
@@ -217,7 +217,8 @@ def test(path, shell, indent=2):
     abspath = os.path.abspath(path)
     env = os.environ.copy()
     env['TESTDIR'] = os.path.dirname(abspath)
-    p = subprocess.Popen([shell, '-'], bufsize=-1, stdin=subprocess.PIPE,
+    cmd_list = [shell] + shell_args
+    p = subprocess.Popen(cmd_list, bufsize=-1, stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          universal_newlines=True, env=env,
                          preexec_fn=makeresetsigpipe(),
@@ -234,22 +235,28 @@ def test(path, shell, indent=2):
             after.setdefault(pos, []).append(line)
             prepos = pos
             pos = i
-            stdin.append('echo "\n%s %s $?"\n' % (salt, i))
+            stdin.append(' echo "\n%s %s $?"\n' % (salt, i))
             stdin.append(line[len(cmdline):])
         elif line.startswith(conline):
             after.setdefault(prepos, []).append(line)
             stdin.append(line[len(conline):])
         elif not line.startswith(indent):
             after.setdefault(pos, []).append(line)
-    stdin.append('echo "\n%s %s $?"\n' % (salt, i + 1))
+    stdin.append(' echo "\n%s %s $?"\n' % (salt, i + 1))
 
     output = p.communicate(input=encodeinput(''.join(stdin)))[0]
+    
     if p.returncode == 80:
         return (refout, None, [])
 
     # Add a trailing newline to the input script if it's missing.
     if refout and not refout[-1].endswith('\n'):
         refout[-1] += '\n'
+    
+    if ignore:
+        ignored_line = re.compile(ignore).search
+    else:
+        ignored_line = lambda line: False
 
     # We use str.split instead of splitlines to get consistent
     # behavior between Python 2 and 3. In 3, we use unicode strings,
@@ -258,19 +265,20 @@ def test(path, shell, indent=2):
     ret = 0
     for i, line in enumerate(output[:-1].split('\n')):
         line += '\n'
-        if line.startswith(salt):
-            presalt = postout.pop()
-            if presalt != '%s\n' % indent:
-                postout.append(presalt[:-1] + ' (no-eol)\n')
-            ret = int(line.split()[2])
-            if ret != 0:
-                postout.append('%s[%s]\n' % (indent, ret))
-            postout += after.pop(pos, [])
-            pos = int(line.split()[1])
-        else:
-            if needescape(line):
-                line = escape(line)
-            postout.append(indent + line)
+        if not ignored_line(line):
+            if line.startswith(salt):
+                presalt = postout.pop()
+                if presalt != '%s\n' % indent:
+                    postout.append(presalt[:-1] + ' (no-eol)\n')
+                ret = int(line.split()[2])
+                if ret != 0:
+                    postout.append('%s[%s]\n' % (indent, ret))
+                postout += after.pop(pos, [])
+                pos = int(line.split()[1])
+            else:
+                if needescape(line):
+                    line = escape(line)
+                postout.append(indent + line)
     postout += after.pop(pos, [])
 
     diff = unified_diff(refout, postout, abspath, abspath + '.err')
@@ -331,8 +339,8 @@ def patch(cmd, diff):
     return p.returncode == 0
 
 
-def run(paths, tmpdir, shell, quiet=False, verbose=False, patchcmd=None,
-        answer=None, indent=2):
+def run(paths, tmpdir, shell, shell_args, quiet=False, verbose=False, patchcmd=None,
+        answer=None, indent=2, ignore=None):
     """Run tests in paths in tmpdir.
 
     If quiet is True, diffs aren't printed. If verbose is True,
@@ -362,7 +370,7 @@ def run(paths, tmpdir, shell, quiet=False, verbose=False, patchcmd=None,
             os.mkdir(testdir)
             try:
                 os.chdir(testdir)
-                refout, postout, diff = test(abspath, shell, indent)
+                refout, postout, diff = test(abspath, shell, shell_args, indent, ignore)
             finally:
                 os.chdir(cwd)
 
@@ -496,8 +504,12 @@ def main(args):
                  help='keep temporary directories')
     p.add_option('--shell', action='store', default=shell, metavar='PATH',
                  help='shell to use for running tests')
+    p.add_option('--shell_args', action='store', default='-', metavar='ARGS',
+                 help='specific arguments to be conveyed to the shell')
     p.add_option('--indent', action='store', default=None, metavar='NUM',
                  type='int', help='number of spaces to use for indentation')
+    p.add_option('--ignore', action='store', default=None, metavar='REGEX',
+                 help='regex for lines to be ignored')
     opts, paths = p.parse_args(args)
 
     if opts.version:
@@ -555,8 +567,8 @@ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
         answer = None
 
     try:
-        return run(paths, tmpdir, opts.shell, opts.quiet, opts.verbose,
-                   patchcmd, answer, opts.indent)
+        return run(paths, tmpdir, opts.shell, opts.shell_args.split(), opts.quiet, opts.verbose,
+                   patchcmd, answer, opts.indent, opts.ignore)
     finally:
         if opts.keep_tmpdir:
             log('# Kept temporary directory: %s\n' % tmpdir)
